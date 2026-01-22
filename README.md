@@ -1,6 +1,6 @@
 # Setto Gasless Payment - EVM Contracts
 
-Smart contracts for gasless token payments on EVM-compatible chains.
+Smart contracts for gasless token on EVM-compatible chains.
 
 ## Overview
 
@@ -31,3 +31,4 @@ All contracts are verified on block explorers.
 ## License
 
 MIT
+
