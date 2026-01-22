@@ -1,13 +1,14 @@
-# Setto Gasless - EVM Contracts
+# Setto - EVM Contracts
 
-Smart contracts for gasless token on EVM-compatible chains.
+Smart contracts for gasless token transfers on EVM-compatible chains.
 
 ## Overview
 
-SettoPaymentV4 enables gasless token transfers using:
-- **EIP-712 Signatures** - Typed structured data signing
-- **Permit2** - Uniswap's token approval protocol
+Enables gasless token transfers using:
+- **EIP-712 Signatures** - Typed structured data signing for secure off-chain authorization
+- **Permit2** - Uniswap's token approval protocol for streamlined approvals
 - **Relayer Network** - Whitelisted relayers pay gas on behalf of users
+- **UUPS Proxy** - Upgradeable contract pattern for seamless updates
 
 ## Deployed Networks
 
@@ -31,5 +32,3 @@ All contracts are verified on block explorers.
 ## License
 
 MIT
-
-
