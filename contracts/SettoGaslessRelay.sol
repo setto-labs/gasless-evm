@@ -13,14 +13,15 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
- * @title SettoPaymentV4
- * @notice Gas-sponsored payment contract (Permit2 + EIP-2612 Permit)
- * @dev V4 Changes:
- *      - Added EIP-2612 Permit support for USDC (no initial approve TX needed)
- *      - Permit2 still supported for USDT and other tokens
- *      - Inherits all V3 features (multi-signer, no relayer check)
+ * @title SettoGaslessRelay
+ * @notice Gasless relay contract for ERC20 token transfers (Permit2 + EIP-2612 Permit)
+ * @dev Features:
+ *      - EIP-2612 Permit support (USDC - no initial approve TX needed)
+ *      - Permit2 support (USDT and other tokens)
+ *      - Multi-signer/relayer support
+ *      - Emergency pause/unpause
  */
-contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgradeable, MulticallUpgradeable, UUPSUpgradeable {
+contract SettoGaslessRelay is Initializable, EIP712Upgradeable, ReentrancyGuardUpgradeable, MulticallUpgradeable, UUPSUpgradeable {
     using ECDSA for bytes32;
     using SafeERC20 for IERC20;
 
@@ -47,14 +48,12 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
 
     /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     IPermit2 public immutable permit2;
-    address public owner;              // Gnosis Safe 2/3
-    address public emergencyAdmin;     // Individual wallet for emergency response
-    mapping(address => bool) public relayers;        // V4: multi-relayer support (replay protection via off-chain DB)
-    mapping(address => bool) public serverSigners;   // V3+: multi-signer support
-    address public feeWallet;
-    bool public paused;                // Emergency pause state
+    address public owner;
+    address public emergencyAdmin;
+    mapping(address => bool) public relayers;
+    mapping(address => bool) public serverSigners;
+    bool public paused;
 
-    // V4: 목록 조회용 배열 (mapping과 동기화)
     address[] private _relayerList;
     address[] private _serverSignerList;
 
@@ -65,19 +64,18 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
     struct Payment {
         bytes32 paymentId;
         address user;
-        address pool;      // Address to receive tokens (Pool)
+        address pool;
         address token;
         uint256 amount;
         uint256 fee;
         uint256 deadline;
-        address to;        // Settlement target address (for event logging)
+        address to;
         bytes serverSignature;
     }
 
-    /// @notice EIP-2612 Permit signature data
     struct ERC20PermitSignature {
-        uint256 value;      // Allowance amount
-        uint256 deadline;   // Permit deadline
+        uint256 value;
+        uint256 deadline;
         uint8 v;
         bytes32 r;
         bytes32 s;
@@ -109,7 +107,6 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
     event ServerSignerRemoved(address indexed signer);
     event RelayerAdded(address indexed relayer);
     event RelayerRemoved(address indexed relayer);
-    event FeeWalletChanged(address indexed oldWallet, address indexed newWallet);
     event OwnerChanged(address indexed oldOwner, address indexed newOwner);
     event EmergencyAdminChanged(address indexed oldAdmin, address indexed newAdmin);
     event Paused(address indexed by);
@@ -153,63 +150,39 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
     function initialize(
         address _owner,
         address _emergencyAdmin,
-        address _serverSigner,
-        address _relayer,
-        address _feeWallet
+        address[] calldata _serverSigners,
+        address[] calldata _relayers
     ) public initializer {
         require(_owner != address(0), "Invalid owner");
         require(_emergencyAdmin != address(0), "Invalid emergencyAdmin");
-        require(_serverSigner != address(0), "Invalid serverSigner");
-        require(_relayer != address(0), "Invalid relayer");
-        require(_feeWallet != address(0), "Invalid feeWallet");
+        require(_serverSigners.length > 0, "No serverSigners");
+        require(_relayers.length > 0, "No relayers");
+        require(_owner != address(this), "Owner cannot be this contract");
+        require(_emergencyAdmin != address(this), "EmergencyAdmin cannot be this contract");
 
-        __EIP712_init("SettoPayment", "1");
+        __EIP712_init("SettoGaslessRelay", "1");
         __ReentrancyGuard_init();
         __Multicall_init();
         __UUPSUpgradeable_init();
 
         owner = _owner;
         emergencyAdmin = _emergencyAdmin;
-        serverSigners[_serverSigner] = true;
-        _serverSignerList.push(_serverSigner);
-        relayers[_relayer] = true;
-        _relayerList.push(_relayer);
-        feeWallet = _feeWallet;
 
-        emit ServerSignerAdded(_serverSigner);
-        emit RelayerAdded(_relayer);
-    }
+        for (uint256 i = 0; i < _serverSigners.length; i++) {
+            require(_serverSigners[i] != address(0), "Invalid serverSigner");
+            require(!serverSigners[_serverSigners[i]], "Duplicate serverSigner");
+            serverSigners[_serverSigners[i]] = true;
+            _serverSignerList.push(_serverSigners[i]);
+            emit ServerSignerAdded(_serverSigners[i]);
+        }
 
-    /**
-     * @notice Reinitialize for V4 upgrade - reset all settings
-     * @dev Overwrites all role settings (one-time only via reinitializer)
-     */
-    function initializeV4(
-        address _owner,
-        address _emergencyAdmin,
-        address _serverSigner,
-        address _relayer,
-        address _feeWallet
-    ) public reinitializer(4) {
-        require(_owner != address(0), "Invalid owner");
-        require(_emergencyAdmin != address(0), "Invalid emergencyAdmin");
-        require(_serverSigner != address(0), "Invalid serverSigner");
-        require(_relayer != address(0), "Invalid relayer");
-        require(_feeWallet != address(0), "Invalid feeWallet");
-
-        owner = _owner;
-        emergencyAdmin = _emergencyAdmin;
-        serverSigners[_serverSigner] = true;
-        _serverSignerList.push(_serverSigner);
-        relayers[_relayer] = true;
-        _relayerList.push(_relayer);
-        feeWallet = _feeWallet;
-
-        emit OwnerChanged(address(0), _owner);
-        emit EmergencyAdminChanged(address(0), _emergencyAdmin);
-        emit ServerSignerAdded(_serverSigner);
-        emit RelayerAdded(_relayer);
-        emit FeeWalletChanged(address(0), _feeWallet);
+        for (uint256 i = 0; i < _relayers.length; i++) {
+            require(_relayers[i] != address(0), "Invalid relayer");
+            require(!relayers[_relayers[i]], "Duplicate relayer");
+            relayers[_relayers[i]] = true;
+            _relayerList.push(_relayers[i]);
+            emit RelayerAdded(_relayers[i]);
+        }
     }
 
     // ============================================
@@ -219,22 +192,23 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     // ============================================
-    // External Functions - Permit2 (from V3)
+    // External Functions - Permit2
     // ============================================
 
     /**
      * @notice Set Permit2 allowance + batch payment processing (for first-time payments)
-     * @dev Anyone can call this - serverSignature is the only authorization
      * @param permitOwners Array of Permit2 signers (token owners)
      * @param permitSingles Array of Permit2 PermitSingle structs
      * @param permitSignatures Array of Permit2 signatures (empty bytes skips permit)
      * @param payments Array of payment info
+     * @param feeWallet Address to receive fees
      */
     function batchPermitAndPay(
         address[] calldata permitOwners,
         IPermit2.PermitSingle[] calldata permitSingles,
         bytes[] calldata permitSignatures,
-        Payment[] calldata payments
+        Payment[] calldata payments,
+        address feeWallet
     ) external onlyRelayer whenNotPaused {
         require(payments.length > 0, "Empty batch");
         require(permitOwners.length == payments.length, "Length mismatch: owners");
@@ -248,7 +222,8 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
                 permitOwners[i],
                 permitSingles[i],
                 permitSignatures[i],
-                payments[i]
+                payments[i],
+                feeWallet
             ) {
                 successCount++;
             } catch Error(string memory reason) {
@@ -264,18 +239,19 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
 
     /**
      * @notice Multi-user batch payment (Permit2 AllowanceTransfer, for repeat payments)
-     * @dev Anyone can call this - serverSignature is the only authorization
      * @param payments Array of payments
+     * @param feeWallet Address to receive fees
      */
     function batchPayFromMultiUser(
-        Payment[] calldata payments
+        Payment[] calldata payments,
+        address feeWallet
     ) external onlyRelayer whenNotPaused {
         require(payments.length > 0, "Empty batch");
 
         uint256 successCount = 0;
 
         for (uint256 i = 0; i < payments.length; ) {
-            try this._executePaymentPermit2(payments[i]) {
+            try this._executePaymentPermit2(payments[i], feeWallet) {
                 successCount++;
             } catch Error(string memory reason) {
                 emit PaymentFailed(payments[i].paymentId, payments[i].user, payments[i].amount, reason);
@@ -295,7 +271,8 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
         address permitOwner,
         IPermit2.PermitSingle calldata permitSingle,
         bytes calldata permitSignature,
-        Payment calldata payment
+        Payment calldata payment,
+        address feeWallet
     ) external {
         require(msg.sender == address(this), "Internal only");
 
@@ -303,31 +280,33 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
             permit2.permit(permitOwner, permitSingle, permitSignature);
         }
 
-        _executePaymentPermit2Internal(payment);
+        _executePaymentPermit2Internal(payment, feeWallet);
     }
 
     /**
      * @notice Execute individual payment (Permit2) - external for try-catch
      */
     function _executePaymentPermit2(
-        Payment calldata p
+        Payment calldata p,
+        address feeWallet
     ) external {
         require(msg.sender == address(this), "Internal only");
-        _executePaymentPermit2Internal(p);
+        _executePaymentPermit2Internal(p, feeWallet);
     }
 
     /**
      * @notice Execute individual payment (Permit2) - internal implementation
      */
     function _executePaymentPermit2Internal(
-        Payment calldata p
+        Payment calldata p,
+        address feeWallet
     ) internal {
         _verifyServerSignature(p);
         require(block.timestamp <= p.deadline, "Payment expired");
 
         permit2.transferFrom(p.user, p.pool, uint160(p.amount), p.token);
 
-        if (p.fee > 0) {
+        if (p.fee > 0 && feeWallet != address(0)) {
             permit2.transferFrom(p.user, feeWallet, uint160(p.fee), p.token);
         }
 
@@ -342,19 +321,19 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
     }
 
     // ============================================
-    // External Functions - EIP-2612 Permit (V4 NEW)
+    // External Functions - EIP-2612 Permit
     // ============================================
 
     /**
      * @notice Batch payment with EIP-2612 Permit (for USDC)
-     * @dev No initial approve TX needed - permit signature sets allowance directly
-     *      Use this for USDC. For USDT, use Permit2 functions.
      * @param permitSignatures Array of EIP-2612 permit signatures
      * @param payments Array of payment info
+     * @param feeWallet Address to receive fees
      */
     function batchPermitERC20AndPay(
         ERC20PermitSignature[] calldata permitSignatures,
-        Payment[] calldata payments
+        Payment[] calldata payments,
+        address feeWallet
     ) external onlyRelayer whenNotPaused {
         require(payments.length > 0, "Empty batch");
         require(permitSignatures.length == payments.length, "Length mismatch");
@@ -364,7 +343,8 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
         for (uint256 i = 0; i < payments.length; ) {
             try this._executePermitERC20AndPay(
                 permitSignatures[i],
-                payments[i]
+                payments[i],
+                feeWallet
             ) {
                 successCount++;
             } catch Error(string memory reason) {
@@ -380,18 +360,19 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
 
     /**
      * @notice Batch payment using existing ERC20 allowance (no permit needed)
-     * @dev Use this when user has already approved this contract via ERC20.approve()
      * @param payments Array of payment info
+     * @param feeWallet Address to receive fees
      */
     function batchPayERC20(
-        Payment[] calldata payments
+        Payment[] calldata payments,
+        address feeWallet
     ) external onlyRelayer whenNotPaused {
         require(payments.length > 0, "Empty batch");
 
         uint256 successCount = 0;
 
         for (uint256 i = 0; i < payments.length; ) {
-            try this._executePaymentERC20(payments[i]) {
+            try this._executePaymentERC20(payments[i], feeWallet) {
                 successCount++;
             } catch Error(string memory reason) {
                 emit PaymentFailed(payments[i].paymentId, payments[i].user, payments[i].amount, reason);
@@ -409,11 +390,11 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
      */
     function _executePermitERC20AndPay(
         ERC20PermitSignature calldata permitSig,
-        Payment calldata payment
+        Payment calldata payment,
+        address feeWallet
     ) external {
         require(msg.sender == address(this), "Internal only");
 
-        // Execute EIP-2612 permit (sets allowance)
         IERC20Permit(payment.token).permit(
             payment.user,
             address(this),
@@ -424,34 +405,33 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
             permitSig.s
         );
 
-        _executePaymentERC20Internal(payment);
+        _executePaymentERC20Internal(payment, feeWallet);
     }
 
     /**
      * @notice Execute individual payment (ERC20) - external for try-catch
      */
     function _executePaymentERC20(
-        Payment calldata p
+        Payment calldata p,
+        address feeWallet
     ) external {
         require(msg.sender == address(this), "Internal only");
-        _executePaymentERC20Internal(p);
+        _executePaymentERC20Internal(p, feeWallet);
     }
 
     /**
      * @notice Execute individual payment (ERC20) - internal implementation
-     * @dev Uses safeTransferFrom instead of Permit2
      */
     function _executePaymentERC20Internal(
-        Payment calldata p
+        Payment calldata p,
+        address feeWallet
     ) internal {
         _verifyServerSignature(p);
         require(block.timestamp <= p.deadline, "Payment expired");
 
-        // Direct ERC20 transfer (to pool)
         IERC20(p.token).safeTransferFrom(p.user, p.pool, p.amount);
 
-        // Direct ERC20 transfer (to feeWallet, if fee exists)
-        if (p.fee > 0) {
+        if (p.fee > 0 && feeWallet != address(0)) {
             IERC20(p.token).safeTransferFrom(p.user, feeWallet, p.fee);
         }
 
@@ -469,10 +449,6 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
     // Internal Functions
     // ============================================
 
-    /**
-     * @notice Verify server signature
-     * @param p Payment struct
-     */
     function _verifyServerSignature(Payment calldata p) internal view {
         bytes32 structHash = keccak256(abi.encode(
             PAYMENT_TYPEHASH,
@@ -493,7 +469,7 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
     }
 
     // ============================================
-    // Admin Functions - Owner (Gnosis Safe 2/3)
+    // Admin Functions - Owner
     // ============================================
 
     function addServerSigner(address _serverSigner) external onlyOwner {
@@ -526,15 +502,9 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
         emit RelayerRemoved(_relayer);
     }
 
-    function setFeeWallet(address _feeWallet) external onlyOwner {
-        require(_feeWallet != address(0), "Invalid feeWallet");
-        address oldWallet = feeWallet;
-        feeWallet = _feeWallet;
-        emit FeeWalletChanged(oldWallet, _feeWallet);
-    }
-
     function setEmergencyAdmin(address _emergencyAdmin) external onlyOwner {
         require(_emergencyAdmin != address(0), "Invalid emergencyAdmin");
+        require(_emergencyAdmin != address(this), "EmergencyAdmin cannot be this contract");
         address oldAdmin = emergencyAdmin;
         emergencyAdmin = _emergencyAdmin;
         emit EmergencyAdminChanged(oldAdmin, _emergencyAdmin);
@@ -542,6 +512,7 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
 
     function transferOwnership(address _newOwner) external onlyOwner {
         require(_newOwner != address(0), "Invalid owner");
+        require(_newOwner != address(this), "Owner cannot be this contract");
         address oldOwner = owner;
         owner = _newOwner;
         emit OwnerChanged(oldOwner, _newOwner);
@@ -595,13 +566,6 @@ contract SettoPaymentV4 is Initializable, EIP712Upgradeable, ReentrancyGuardUpgr
             _removeFromArray(_relayerList, _relayer);
         }
         emit RelayerRemoved(_relayer);
-    }
-
-    function emergencySetFeeWallet(address _feeWallet) external onlyEmergencyAdmin {
-        require(_feeWallet != address(0), "Invalid feeWallet");
-        address oldWallet = feeWallet;
-        feeWallet = _feeWallet;
-        emit FeeWalletChanged(oldWallet, _feeWallet);
     }
 
     // ============================================
