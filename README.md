@@ -12,7 +12,7 @@ Enables gasless token transfers using:
 
 ## Deployed Networks
 
-All networks use the same proxy address: `0x81Bc71dc638cd173e3907cfdd60c7fb2fd320912`
+All networks use the same proxy address: `0x2F3Eca467F1d4Dc66A58342a9ebDA6dEf5e27682`
 
 | Network | Chain ID | Verified Contract |
 |---------|----------|-------------------|
@@ -32,3 +32,4 @@ All contracts are verified on block explorers.
 ## License
 
 MIT
+
